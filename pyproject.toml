@@ -1,0 +1,24 @@
+[project]
+name = "microwink"
+version = "0.0.1"
+description = "Lightweight instance segmentation model for card IDs"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "cospectrum", email = "severinalexeyv@gmail.com" }]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.2.0",
+    "onnxruntime>=1.20.1",
+    "opencv-python>=4.10.0.84",
+    "pillow>=11.0.0",
+]
+
+[project.urls]
+Repository = "https://github.com/cospectrum/microwink"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["mypy>=1.13.0", "pytest>=8.3.4", "ruff>=0.8.3"]
