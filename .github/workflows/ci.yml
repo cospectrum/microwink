@@ -26,7 +26,7 @@ jobs:
       - name: Install the project
         run: uv sync --all-extras --dev
       - name: pytest
-        run: uv run pyteset
+        run: uv run pytest
       - name: mypy
         run: uv run mypy .
       - name: ruff check
