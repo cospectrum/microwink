@@ -24,4 +24,7 @@ for card in cards:
 
 img.save("./assets/result.png")
 ```
-<img align="middle" src="./assets/result.png">
+
+<p align="middle">
+  <img src="./assets/result.png">
+</p>
