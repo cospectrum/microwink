@@ -1,20 +1,27 @@
 # microwink
-Lightweight instance segmentation model for card IDs
+Lightweight instance segmentation for card IDs
+
+## Install
+```sh
+pip install microwink
+```
 
 ## Usage
-
 ```python
 from microwink import SegModel
-from microwink.common import draw_mask
+from microwink.common import draw_mask, draw_box
 from PIL import Image
 
 seg_model = SegModel.from_path("./models/seg_model.onnx")
 
-img = Image.open("...").convert("RGB")
+img = Image.open("./tests/data/us_card.png").convert("RGB")
 cards = seg_model.apply(img)
 
 for card in cards:
-    print(f"{card.score=}, {card.box=}")
+    print(f"score={card.score}, box={card.box}")
     img = draw_mask(img, card.mask > 0.5)
-img.save("result.png")
+    img = draw_box(img, card.box)
+
+img.save("./assets/result.png")
 ```
+<img align="middle" src="./assets/result.png">

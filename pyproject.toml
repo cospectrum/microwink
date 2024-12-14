@@ -1,7 +1,7 @@
 [project]
 name = "microwink"
 version = "0.0.1"
-description = "Lightweight instance segmentation model for card IDs"
+description = "Lightweight instance segmentation for card IDs"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 authors = [{ name = "cospectrum", email = "severinalexeyv@gmail.com" }]
