@@ -60,8 +60,6 @@ class SegModel:
     def from_path(
         path: str | os.PathLike, *, providers: Sequence[str] | None = None
     ) -> "SegModel":
-        if providers is None:
-            providers = ["CPUExecutionProvider"]
         return SegModel.from_session(ort.InferenceSession(path, providers=providers))
 
     @staticmethod
