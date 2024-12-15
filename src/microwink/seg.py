@@ -1,11 +1,11 @@
-import math
 import os
+import math
 import onnxruntime as ort  # type: ignore # missing stubs
 import numpy as np
-import cv2 as cv
 
 from typing import Sequence
 from dataclasses import dataclass
+from PIL import Image
 from PIL.Image import Image as PILImage
 
 from . import common
@@ -79,7 +79,9 @@ class SegModel:
         )
 
     def apply(
-        self, image: PILImage, threshold: Threshold = Threshold.default()
+        self,
+        image: PILImage,
+        threshold: Threshold = Threshold.default(),
     ) -> list[SegResult]:
         assert image.mode == "RGB"
         tensor = self.preprocess(image)
@@ -104,7 +106,10 @@ class SegModel:
         return out
 
     def postprocess(
-        self, outs: list[np.ndarray], img_size: tuple[H, W], threshold: Threshold
+        self,
+        outs: list[np.ndarray],
+        img_size: tuple[H, W],
+        threshold: Threshold,
     ) -> Result | None:
         NUM_MASKS = 32
         box_out, mask_out = outs
@@ -130,7 +135,10 @@ class SegModel:
         final_boxes = boxes[indexes]
         final_scores = scores[indexes]
         final_mask_maps = self.postprocess_mask(
-            mask_preds[indexes], mask_out, final_boxes, img_size
+            mask_preds[indexes],
+            mask_out,
+            final_boxes,
+            img_size,
         )
         assert len(final_boxes) == len(final_scores) == len(final_mask_maps)
         return Result(
@@ -165,33 +173,30 @@ class SegModel:
                 iw,
             )
         )
-        blur_size = (
-            int(iw / mask_width),
-            int(ih / mask_height),
-        )
-        for i in range(len(scaled_boxes)):
-            scaled_box: np.ndarray = scaled_boxes[i]
-            box: np.ndarray = boxes[i]
-            scale_x1 = int(math.floor(scaled_box[0]))
-            scale_y1 = int(math.floor(scaled_box[1]))
-            scale_x2 = int(math.ceil(scaled_box[2]))
-            scale_y2 = int(math.ceil(scaled_box[3]))
-
-            x1 = int(math.floor(box[0]))
-            y1 = int(math.floor(box[1]))
-            x2 = int(math.ceil(box[2]))
-            y2 = int(math.ceil(box[3]))
-
-            mask: np.ndarray = masks[i]
+        assert len(scaled_boxes) == len(masks)
+        assert len(scaled_boxes) == len(boxes)
+        for i, (box, scaled_box, mask) in enumerate(zip(boxes, scaled_boxes, masks)):
             assert 2 == len(mask.shape)
-            final_mask = cv.resize(
+
+            scale_x1 = math.floor(scaled_box[0])
+            scale_y1 = math.floor(scaled_box[1])
+            scale_x2 = math.ceil(scaled_box[2])
+            scale_y2 = math.ceil(scaled_box[3])
+
+            x1 = math.floor(box[0])
+            y1 = math.floor(box[1])
+            x2 = math.ceil(box[2])
+            y2 = math.ceil(box[3])
+
+            ow, oh = (x2 - x1, y2 - y1)
+            assert ow >= 0
+            assert oh >= 0
+            resized_mask = resize(
                 mask[scale_y1:scale_y2, scale_x1:scale_x2],
-                (x2 - x1, y2 - y1),
-                interpolation=cv.INTER_CUBIC,
+                (ow, oh),
             )
-            final_mask = cv.blur(final_mask, blur_size)  # -> [-inf, +inf]
-            final_mask = common.sigmoid(final_mask).clip(0.0, 1.0)
-            mask_maps[i, y1:y2, x1:x2] = final_mask
+            assert resized_mask.shape == (oh, ow)
+            mask_maps[i, y1:y2, x1:x2] = common.sigmoid(resized_mask).clip(0.0, 1.0)
 
         return mask_maps
 
@@ -204,7 +209,8 @@ class SegModel:
 
     def preprocess(self, image: PILImage) -> np.ndarray:
         size = (self.input_shape.w, self.input_shape.h)
-        image = image.resize(size)
+        if image.size != size:
+            image = image.resize(size)
         img = np.array(image).astype(np.float32)
         assert len(img.shape) == 3
         img /= 255.0
@@ -295,3 +301,11 @@ def compute_iou(box: np.ndarray, boxes: np.ndarray) -> np.ndarray:
 
     iou = intersection_area / union_area
     return iou
+
+
+def resize(buf: np.ndarray, size: tuple[W, H]) -> np.ndarray:
+    img = Image.fromarray(buf).resize(size)
+    out = np.array(img)
+    assert out.dtype == buf.dtype
+    assert len(out.shape) == len(buf.shape)
+    return out
