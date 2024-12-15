@@ -32,7 +32,7 @@ def draw_box(
     box: Box,
     *,
     color: tuple[int, ...] | str | float = (255, 0, 0),
-    width: int = 4,
+    width: int = 3,
 ) -> PILImage:
     image = image.copy()
     draw = ImageDraw.Draw(image)

@@ -1,7 +1,7 @@
 [project]
 name = "microwink"
-version = "0.0.1"
-description = "Lightweight instance segmentation for card IDs"
+version = "0.0.2"
+description = "Lightweight instance segmentation of card IDs"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 authors = [{ name = "cospectrum", email = "severinalexeyv@gmail.com" }]
@@ -9,7 +9,6 @@ requires-python = ">=3.10"
 dependencies = [
     "numpy>=2.2.0",
     "onnxruntime>=1.20.1",
-    "opencv-python>=4.10.0.84",
     "pillow>=11.0.0",
 ]
 
