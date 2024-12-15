@@ -7,8 +7,8 @@ from microwink import SegModel
 from microwink.common import Box, draw_mask
 
 
-DATA_ROOT = Path("./tests/data/")
-TRUTH_ROOT = Path("./tests/data/truth/")
+DATA_ROOT = Path("./assets/data/")
+TRUTH_ROOT = Path("./tests/truth/seg_model/")
 BIN_THRESHOLD = 0.5
 
 
