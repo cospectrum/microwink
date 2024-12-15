@@ -1,4 +1,5 @@
 import os
+import math
 import onnxruntime as ort  # type: ignore # missing stubs
 import numpy as np
 
@@ -177,15 +178,15 @@ class SegModel:
         for i, (box, scaled_box, mask) in enumerate(zip(boxes, scaled_boxes, masks)):
             assert 2 == len(mask.shape)
 
-            scale_x1 = int(scaled_box[0])
-            scale_y1 = int(scaled_box[1])
-            scale_x2 = 1 + int(scaled_box[2])
-            scale_y2 = 1 + int(scaled_box[3])
+            scale_x1 = math.floor(scaled_box[0])
+            scale_y1 = math.floor(scaled_box[1])
+            scale_x2 = math.ceil(scaled_box[2])
+            scale_y2 = math.ceil(scaled_box[3])
 
-            x1 = int(box[0])
-            y1 = int(box[1])
-            x2 = 1 + int(box[2])
-            y2 = 1 + int(box[3])
+            x1 = math.floor(box[0])
+            y1 = math.floor(box[1])
+            x2 = math.ceil(box[2])
+            y2 = math.ceil(box[3])
 
             ow, oh = (x2 - x1, y2 - y1)
             assert ow >= 0
