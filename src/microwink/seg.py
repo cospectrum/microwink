@@ -94,7 +94,7 @@ class SegModel:
         out = []
         assert len(result.boxes) == len(result.scores) == len(result.mask_maps)
         for box, score, mask in zip(result.boxes, result.scores, result.mask_maps):
-            assert len(mask.shape) == 2
+            assert mask.ndim == 2
             assert mask.dtype == np.float64
             out.append(
                 SegResult(
@@ -166,17 +166,11 @@ class SegModel:
             (ih, iw),
             (mask_height, mask_width),
         )
-        mask_maps = np.zeros(
-            (
-                len(scaled_boxes),
-                ih,
-                iw,
-            )
-        )
+        mask_maps = np.zeros((len(scaled_boxes), ih, iw))
         assert len(scaled_boxes) == len(masks)
         assert len(scaled_boxes) == len(boxes)
         for i, (box, scaled_box, mask) in enumerate(zip(boxes, scaled_boxes, masks)):
-            assert 2 == len(mask.shape)
+            assert mask.ndim == 2
 
             scale_x1 = math.floor(scaled_box[0])
             scale_y1 = math.floor(scaled_box[1])
@@ -212,7 +206,7 @@ class SegModel:
         if image.size != size:
             image = image.resize(size)
         img = np.array(image).astype(np.float32)
-        assert len(img.shape) == 3
+        assert img.ndim == 3
         img /= 255.0
         img = img.transpose(2, 0, 1)
         tensor = img[np.newaxis, :, :, :]
@@ -307,5 +301,5 @@ def resize(buf: np.ndarray, size: tuple[W, H]) -> np.ndarray:
     img = Image.fromarray(buf).resize(size)
     out = np.array(img)
     assert out.dtype == buf.dtype
-    assert len(out.shape) == len(buf.shape)
+    assert out.ndim == buf.ndim
     return out
