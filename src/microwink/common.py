@@ -1,9 +1,13 @@
+import typing
 import numpy as np
 
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 from PIL import Image, ImageDraw
 from PIL.Image import Image as PILImage
+
+if typing.TYPE_CHECKING:
+    from _typeshed import ConvertibleToFloat
 
 
 @dataclass
@@ -14,7 +18,7 @@ class Box:
     w: float
 
     @staticmethod
-    def from_xyxy(box: Iterable[Any]) -> "Box":
+    def from_xyxy(box: Iterable["ConvertibleToFloat"]) -> "Box":
         x1, y1, x2, y2 = [float(t) for t in box]
         h = y2 - y1
         w = x2 - x1
@@ -34,6 +38,7 @@ def draw_box(
     color: tuple[int, ...] | str | float = (255, 0, 0),
     width: int = 3,
 ) -> PILImage:
+    assert width >= 0
     image = image.copy()
     draw = ImageDraw.Draw(image)
     points = [(box.x, box.y), (box.x + box.w, box.y + box.h)]
@@ -51,7 +56,7 @@ def draw_mask(
     assert 0.0 <= alpha <= 1.0
     assert (image.height, image.width) == binary_mask.shape
     img = np.array(image)
-    assert len(img.shape) == len(color)
+    assert img.ndim == len(color)
     overlay = np.zeros_like(img)
     overlay[binary_mask] = color
     assert overlay.shape == img.shape
