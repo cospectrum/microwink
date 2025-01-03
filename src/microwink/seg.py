@@ -46,6 +46,9 @@ class InputShape:
     h: H
     w: W
 
+    def as_tuple(self) -> tuple[int, int, int, int]:
+        return (self.batch, self.ch, self.h, self.w)
+
 
 @dataclass
 class SegModel:
@@ -85,9 +88,11 @@ class SegModel:
     ) -> list[SegResult]:
         assert image.mode == "RGB"
         tensor = self.preprocess(image)
-        outs = self.forward(tensor)
+        net_outs = self.forward(tensor)
+        assert len(net_outs) == 2
+
         img_size = (image.height, image.width)
-        result = self.postprocess(outs, img_size, threshold)
+        result = self.postprocess(net_outs, img_size, threshold)
         if result is None:
             return []
 
@@ -112,14 +117,18 @@ class SegModel:
         threshold: Threshold,
     ) -> Result | None:
         NUM_MASKS = 32
+        NUM_CLASSES = 1
+        OFFSET = 4
+
         box_out, mask_out = outs
+        assert box_out.shape == (1, OFFSET + NUM_CLASSES + NUM_MASKS, 8400)
+        assert mask_out.shape == (1, NUM_MASKS, 160, 160)
 
         preds = np.squeeze(box_out).T
-        num_classes = box_out.shape[1] - NUM_MASKS - 4
-        assert num_classes >= 0
-        split_at = 4 + num_classes
+        assert preds.shape == (8400, OFFSET + NUM_CLASSES + NUM_MASKS)
+        split_at = OFFSET + NUM_CLASSES
 
-        scores = np.max(preds[:, 4:split_at], axis=1)
+        scores = np.max(preds[:, OFFSET:split_at], axis=1)
         preds = preds[scores > threshold.confidence, :]
         scores = scores[scores > threshold.confidence]
         if len(scores) == 0:
@@ -195,6 +204,7 @@ class SegModel:
         return mask_maps
 
     def forward(self, tensor: np.ndarray) -> list[np.ndarray]:
+        assert tensor.shape == self.input_shape.as_tuple()
         outs = self.session.run(
             self.output_names,
             {self.input_names[0]: tensor},
@@ -202,6 +212,7 @@ class SegModel:
         return outs
 
     def preprocess(self, image: PILImage) -> np.ndarray:
+        assert image.mode == "RGB"
         size = (self.input_shape.w, self.input_shape.h)
         if image.size != size:
             image = image.resize(size)
