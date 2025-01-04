@@ -1,5 +1,4 @@
 import os
-import cv2
 import numpy as np
 import onnxruntime as ort  # type: ignore
 
@@ -40,6 +39,8 @@ class SegResult:
 @dataclass
 class RawResult:
     boxes: np.ndarray
+    scores: np.ndarray
+    class_ids: np.ndarray
     masks: np.ndarray
 
 
@@ -82,26 +83,22 @@ class SegModel:
         self, image: PILImage, threshold: Threshold = Threshold()
     ) -> list[SegResult]:
         CLASS_ID = 0
-
         assert image.mode == "RGB"
         buf = RgbBuf(np.array(image))
-
         raw = self._run(buf, threshold.confidence, threshold.iou)
         if raw is None:
             return []
-        assert len(raw.boxes) == len(raw.masks)
 
         results = []
-        for raw_bbox, raw_mask in zip(raw.boxes, raw.masks):
-            x1, y1, x2, y2, score, class_id = raw_bbox
+        it = zip(raw.scores, raw.boxes, raw.masks, raw.class_ids)
+        for score, raw_box, mask, class_id in it:
             assert class_id == CLASS_ID, class_id
             assert 0.0 <= score <= 1.0
-
-            box = common.Box.from_xyxy([x1, y1, x2, y2])
+            box = common.Box.from_xyxy(raw_box)
             results.append(
                 SegResult(
                     score=score,
-                    mask=raw_mask,
+                    mask=mask,
                     box=box,
                 )
             )
@@ -116,7 +113,7 @@ class SegModel:
         blob, ratio, (pad_w, pad_h) = self.preprocess(img)
         assert blob.ndim == 4
         preds = self.session.run(None, {self.input_.name: blob})
-        out = self.postprocess(
+        return self.postprocess(
             preds,
             img_size=(ih, iw),
             ratio=ratio,
@@ -126,14 +123,6 @@ class SegModel:
             iou_threshold=iou_threshold,
             nm=NM,
         )
-        if out is None:
-            return None
-        boxes, masks = out
-        N = len(boxes)
-        assert boxes.shape == (N, 6)
-        assert masks.shape == (N, ih, iw), masks.shape
-        masks = common.sigmoid(masks)
-        return RawResult(boxes=boxes, masks=masks)
 
     def preprocess(
         self, img_buf: RgbBuf
@@ -141,7 +130,6 @@ class SegModel:
         BORDER_COLOR = (114, 114, 114)
         EPS = 0.1
         img = np.array(img_buf)
-
         ih, iw, _ = img.shape
         oh, ow = self.model_height, self.model_width
         r = min(oh / ih, ow / iw)
@@ -155,10 +143,8 @@ class SegModel:
             img = resize(img, (W(rw), H(rh)))
         top, bottom = round(pad_h - EPS), round(pad_h + EPS)
         left, right = round(pad_w - EPS), round(pad_w + EPS)
-        img = cv2.copyMakeBorder(
-            img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=BORDER_COLOR
-        )
-
+        img = self.with_border(img, top, bottom, left, right, BORDER_COLOR)
+        assert img.ndim == 3
         blob = (1 / 255.0) * np.ascontiguousarray(
             np.einsum("HWC->CHW", img),  # type: ignore
             dtype=self.dtype,
@@ -177,7 +163,7 @@ class SegModel:
         conf_threshold: float,
         iou_threshold: float,
         nm: int,
-    ) -> tuple[np.ndarray, np.ndarray] | None:
+    ) -> RawResult | None:
         B = 1
         NM, MH, MW = (nm, 160, 160)
         NUM_CLASSES = 1
@@ -190,65 +176,64 @@ class SegModel:
         assert protos.shape == (NM, MH, MW), protos.shape
         assert x.shape == (len(x), C)
 
-        x = x[x[..., 4 : 4 + NUM_CLASSES].max(axis=1) > conf_threshold]
-        L = len(x)
-        assert x.shape == (L, C)
-        x = np.c_[
-            x[:, :4],  # boxes
-            x[:, 4 : 4 + NUM_CLASSES].max(axis=1),  # scores
-            x[:, 4 : 4 + NUM_CLASSES].argmax(axis=1),  # class_ids
-            x[:, 4 + NUM_CLASSES :],  # masks
-        ]
-        assert x.shape == (L, 1 + C)
+        likely = x[:, 4 : 4 + NUM_CLASSES].max(axis=1) > conf_threshold
+        x = x[likely]
+
+        boxes = x[:, :4]
+        scores = x[:, 4 : 4 + NUM_CLASSES].max(axis=1)
         keep = self.nms(
-            x[:, :4],
-            x[:, 4],
+            boxes,
+            scores,
             conf_threshold=conf_threshold,
             iou_threshold=iou_threshold,
         )
         N = len(keep)
-        x = x[keep]
-        assert x.shape == (N, 1 + C)
         if N == 0:
             return None
+        class_ids = x[:, 4 : 4 + NUM_CLASSES].argmax(axis=1)
+        masks_in = x[:, 4 + NUM_CLASSES :]
 
-        x[:, [0, 1]] -= x[:, [2, 3]] / 2
-        x[:, [2, 3]] += x[:, [0, 1]]
-
-        x[:, :4] -= [pad_w, pad_h, pad_w, pad_h]
-        x[:, :4] /= ratio
+        scores = scores[keep]
+        boxes = boxes[keep]
+        class_ids = class_ids[keep]
+        masks_in = masks_in[keep]
 
         ih, iw = img_size
-        x[:, [0, 2]] = x[:, [0, 2]].clip(0, iw)
-        x[:, [1, 3]] = x[:, [1, 3]].clip(0, ih)
+        boxes = self.postprocess_boxes(boxes, img_size, ratio, pad_w=pad_w, pad_h=pad_h)
+        masks = self.postprocess_masks(protos, masks_in, boxes, (ih, iw))
 
-        boxes = x[:, :4]
-        masks = self.process_mask(protos, x[:, 6:], boxes, (ih, iw))
-        dets = x[:, :6]
         assert masks.shape == (N, ih, iw)
-        assert dets.shape == (N, 6)
-        return dets, masks
-
-    @staticmethod
-    def nms(
-        boxes: np.ndarray,
-        scores: np.ndarray,
-        *,
-        conf_threshold: float,
-        iou_threshold: float,
-    ) -> list[int]:
-        N = len(boxes)
         assert boxes.shape == (N, 4)
         assert scores.shape == (N,)
-        keep = cv2.dnn.NMSBoxes(
-            boxes,  # type: ignore
-            scores,  # type: ignore
-            conf_threshold,
-            iou_threshold,
+        assert class_ids.shape == (N,)
+        return RawResult(
+            boxes=boxes,
+            scores=scores,
+            class_ids=class_ids,
+            masks=masks,
         )
-        return list(keep)
 
-    def process_mask(
+    def postprocess_boxes(
+        self,
+        boxes: np.ndarray,
+        img_size: tuple[H, W],
+        ratio: float,
+        pad_w: float,
+        pad_h: float,
+    ) -> np.ndarray:
+        boxes = boxes.copy()
+        boxes[:, [0, 1]] -= boxes[:, [2, 3]] / 2
+        boxes[:, [2, 3]] += boxes[:, [0, 1]]
+
+        boxes -= [pad_w, pad_h, pad_w, pad_h]
+        boxes /= ratio
+
+        ih, iw = img_size
+        boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(0, iw)
+        boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, ih)
+        return boxes
+
+    def postprocess_masks(
         self,
         protos: np.ndarray,
         masks_in: np.ndarray,
@@ -262,12 +247,12 @@ class SegModel:
 
         masks = np.matmul(masks_in, protos.reshape((nm, -1))).reshape((N, mh, mw))
         ih, iw = img_size
-        masks = self.scale_masks(np.ascontiguousarray(masks), (ih, iw))
+        masks = self._scale_masks(np.ascontiguousarray(masks), (ih, iw))
         assert masks.shape == (N, ih, iw)
-        return self.crop_masks(masks, boxes)
+        return common.sigmoid(self._crop_masks(masks, boxes))
 
     @staticmethod
-    def scale_masks(masks: np.ndarray, img_size: tuple[H, W]) -> np.ndarray:
+    def _scale_masks(masks: np.ndarray, img_size: tuple[H, W]) -> np.ndarray:
         EPS = 0.1
         ih, iw = img_size
         N, mh, mw = masks.shape
@@ -291,7 +276,7 @@ class SegModel:
         return masks_out
 
     @staticmethod
-    def crop_masks(masks: np.ndarray, boxes: np.ndarray) -> np.ndarray:
+    def _crop_masks(masks: np.ndarray, boxes: np.ndarray) -> np.ndarray:
         N, mh, mw = masks.shape
         assert boxes.shape == (N, 4)
         x1, y1, x2, y2 = np.split(boxes[:, :, None], 4, 1)
@@ -302,6 +287,43 @@ class SegModel:
         masks_out = masks * ((r >= x1) * (r < x2) * (c >= y1) * (c < y2))
         assert masks_out.shape == (N, mh, mw)
         return masks_out
+
+    @staticmethod
+    def nms(
+        boxes: np.ndarray,
+        scores: np.ndarray,
+        *,
+        conf_threshold: float,
+        iou_threshold: float,
+    ) -> list[int]:
+        from cv2.dnn import NMSBoxes
+
+        N = len(boxes)
+        assert boxes.shape == (N, 4)
+        assert scores.shape == (N,)
+        keep = NMSBoxes(
+            boxes,  # type: ignore
+            scores,  # type: ignore
+            conf_threshold,
+            iou_threshold,
+        )
+        return list(keep)
+
+    @staticmethod
+    def with_border(
+        img: np.ndarray,
+        top: int,
+        bottom: int,
+        left: int,
+        right: int,
+        color: tuple[int, int, int],
+    ) -> np.ndarray:
+        from cv2 import BORDER_CONSTANT, copyMakeBorder
+
+        assert img.ndim == 3
+        return copyMakeBorder(
+            img, top, bottom, left, right, BORDER_CONSTANT, value=color
+        )
 
 
 def resize(buf: np.ndarray, size: tuple[W, H]) -> np.ndarray:

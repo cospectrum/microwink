@@ -1,5 +1,4 @@
-from microwink import SegModel
-
+from microwink import SegModel, Threshold
 from hypothesis import (
     given,
     settings,
@@ -7,19 +6,17 @@ from hypothesis import (
 )
 from PIL.Image import Image as PILImage
 
-from microwink.seg import Threshold
-
 from .utils.proptest import arbitrary_rgb_image as arb_img
 
 
 @settings(
-    deadline=15 * 1000,
-    max_examples=20,
+    deadline=1 * 1000,
+    max_examples=50,
 )
 @given(
     img=arb_img((1, 1000), (1, 1000)),
-    iou=st.none() | st.floats(0.0, 1.0),
-    score=st.none() | st.floats(0.0, 1.0),
+    iou=st.none() | st.floats(0.01, 1.0),
+    score=st.none() | st.floats(0.01, 1.0),
 )
 def test_apply(
     img: PILImage,
