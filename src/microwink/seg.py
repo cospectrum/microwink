@@ -74,7 +74,7 @@ class SegModel:
         else:
             self.dtype = np.float32
         B, _, H, W = self.input_.shape
-        assert B == 1, 'batching is not supported'
+        assert B == 1, "batching is not supported"
         self.model_height = H
         self.model_width = W
 
@@ -86,7 +86,7 @@ class SegModel:
         assert image.mode == "RGB"
         buf = RgbBuf(np.array(image))
 
-        raw = self._forward(buf, threshold.confidence, threshold.iou)
+        raw = self._run(buf, threshold.confidence, threshold.iou)
         if raw is None:
             return []
         assert len(raw.boxes) == len(raw.masks)
@@ -107,15 +107,15 @@ class SegModel:
             )
         return results
 
-    def _forward(
+    def _run(
         self, img: RgbBuf, conf_threshold: float, iou_threshold: float
     ) -> RawResult | None:
         NM = 32
-        assert img.ndim == 3
+        ih, iw, _ = img.shape
+
         blob, ratio, (pad_w, pad_h) = self.preprocess(img)
         assert blob.ndim == 4
         preds = self.session.run(None, {self.input_.name: blob})
-        ih, iw, _ = img.shape
         out = self.postprocess(
             preds,
             img_size=(ih, iw),
@@ -129,6 +129,9 @@ class SegModel:
         if out is None:
             return None
         boxes, masks = out
+        N = len(boxes)
+        assert boxes.shape == (N, 6)
+        assert masks.shape == (N, ih, iw), masks.shape
         masks = common.sigmoid(masks)
         return RawResult(boxes=boxes, masks=masks)
 
@@ -175,32 +178,33 @@ class SegModel:
         iou_threshold: float,
         nm: int,
     ) -> tuple[np.ndarray, np.ndarray] | None:
-        MH = MW = 160
+        B = 1
+        NM, MH, MW = (nm, 160, 160)
         NUM_CLASSES = 1
-        OFFSET = 4
+        C = 4 + NUM_CLASSES + NM
 
         x, protos = preds
-        B = len(x)
-        assert B == 1, 'batching is not supported'
-        assert x.shape == (B, OFFSET + NUM_CLASSES + nm, 8400)
-        assert protos.shape == (B, nm, MH, MW), protos.shape
+        assert len(x) == len(protos) == B
         protos = protos[0]
+        x = x[0].T
+        assert protos.shape == (NM, MH, MW), protos.shape
+        assert x.shape == (len(x), C)
 
-        split_at = OFFSET + NUM_CLASSES
-
-        x = np.einsum("bcn->bnc", x)
-        x = x[np.max(x[..., 4:split_at], axis=-1) > conf_threshold]
+        x = x[x[..., 4 : 4 + NUM_CLASSES].max(axis=1) > conf_threshold]
+        L = len(x)
+        assert x.shape == (L, C)
         x = np.c_[
-            x[..., :4],
-            np.max(x[..., 4:split_at], axis=-1),
-            np.argmax(x[..., 4:split_at], axis=-1),
-            x[..., split_at:],
+            x[..., :4],  # boxes
+            x[..., 4 : 4 + NUM_CLASSES].max(axis=1),  # scores
+            x[..., 4 : 4 + NUM_CLASSES].argmax(axis=1),  # class_ids
+            x[..., 4 + NUM_CLASSES :],  # masks
         ]
-        assert x.ndim == 2
+        assert x.shape == (L, 1 + C)
         keep = cv2.dnn.NMSBoxes(x[:, :4], x[:, 4], conf_threshold, iou_threshold)
-        x = x[keep, ...]
-
-        if len(x) == 0:
+        N = len(keep)
+        x = x[keep]
+        assert x.shape == (N, 1 + C)
+        if N == 0:
             return None
 
         x[..., [0, 1]] -= x[..., [2, 3]] / 2
@@ -212,24 +216,31 @@ class SegModel:
         ih, iw = img_size
         x[..., [0, 2]] = x[:, [0, 2]].clip(0, iw)
         x[..., [1, 3]] = x[:, [1, 3]].clip(0, ih)
-        masks = self.process_mask(protos, x[:, 6:], x[:, :4], (ih, iw))
-        return x[..., :6], masks
+
+        boxes = x[:, :4]
+        masks = self.process_mask(protos, x[:, 6:], boxes, (ih, iw))
+        dets = x[:, :6]
+        assert masks.shape == (N, ih, iw)
+        assert dets.shape == (N, 6)
+        return dets, masks
 
     def process_mask(
         self,
         protos: np.ndarray,
         masks_in: np.ndarray,
-        bboxes: np.ndarray,
+        boxes: np.ndarray,
         img_size: tuple[H, W],
     ) -> np.ndarray:
         N = len(masks_in)
-        ih, iw = img_size
         nm, mh, mw = protos.shape
-        masks = np.matmul(masks_in, protos.reshape((nm, -1))).reshape((-1, mh, mw))
-        assert masks.shape == (N, mh, mw)
+        assert boxes.shape == (N, 4)
+        assert masks_in.shape == (N, nm)
+
+        masks = np.matmul(masks_in, protos.reshape((nm, -1))).reshape((N, mh, mw))
+        ih, iw = img_size
         masks = self.scale_masks(np.ascontiguousarray(masks), (ih, iw))
         assert masks.shape == (N, ih, iw)
-        return self.crop_masks(masks, bboxes)
+        return self.crop_masks(masks, boxes)
 
     @staticmethod
     def scale_masks(masks: np.ndarray, img_size: tuple[H, W]) -> np.ndarray:
@@ -264,7 +275,9 @@ class SegModel:
         c = np.arange(mh, dtype=x1.dtype)[None, :, None]
         assert r.shape == (1, 1, mw)
         assert c.shape == (1, mh, 1)
-        return masks * ((r >= x1) * (r < x2) * (c >= y1) * (c < y2))
+        masks_out = masks * ((r >= x1) * (r < x2) * (c >= y1) * (c < y2))
+        assert masks_out.shape == (N, mh, mw)
+        return masks_out
 
 
 def resize(buf: np.ndarray, size: tuple[W, H]) -> np.ndarray:
