@@ -16,7 +16,6 @@ Color = tuple[int, int, int]
 
 H = NewType("H", int)
 W = NewType("W", int)
-RgbBuf = NewType("RgbBuf", np.ndarray)
 
 
 @dataclass
@@ -84,8 +83,8 @@ class SegModel:
     ) -> list[SegResult]:
         CLASS_ID = 0
         assert image.mode == "RGB"
-        buf = RgbBuf(np.array(image))
-        raw = self._run(buf, threshold.confidence, threshold.iou)
+
+        raw = self._run(image, threshold.confidence, threshold.iou)
         if raw is None:
             return []
 
@@ -105,17 +104,16 @@ class SegModel:
         return results
 
     def _run(
-        self, img: RgbBuf, conf_threshold: float, iou_threshold: float
+        self, image: PILImage, conf_threshold: float, iou_threshold: float
     ) -> RawResult | None:
         NM = 32
-        ih, iw, _ = img.shape
-
-        blob, ratio, (pad_w, pad_h) = self.preprocess(img)
+        assert image.mode == "RGB"
+        blob, ratio, (pad_w, pad_h) = self.preprocess(image)
         assert blob.ndim == 4
         preds = self.session.run(None, {self.input_.name: blob})
         return self.postprocess(
             preds,
-            img_size=(ih, iw),
+            img_size=(H(image.height), W(image.width)),
             ratio=ratio,
             pad_w=pad_w,
             pad_h=pad_h,
@@ -125,15 +123,20 @@ class SegModel:
         )
 
     def preprocess(
-        self, img_buf: RgbBuf
+        self, image: PILImage
     ) -> tuple[np.ndarray, float, tuple[float, float]]:
         BORDER_COLOR = (114, 114, 114)
         EPS = 0.1
-        img = np.array(img_buf)
+
+        assert image.mode == "RGB"
+        img = np.array(image)
+
         ih, iw, _ = img.shape
         oh, ow = self.model_height, self.model_width
         r = min(oh / ih, ow / iw)
         rw, rh = round(iw * r), round(ih * r)
+        rw = max(1, rw)
+        rh = max(1, rh)
 
         pad_w, pad_h = [
             (ow - rw) / 2,
@@ -167,14 +170,13 @@ class SegModel:
         B = 1
         NM, MH, MW = (nm, 160, 160)
         NUM_CLASSES = 1
-        C = 4 + NUM_CLASSES + NM
 
         x, protos = preds
         assert len(x) == len(protos) == B
         protos = protos[0]
         x = x[0].T
         assert protos.shape == (NM, MH, MW), protos.shape
-        assert x.shape == (len(x), C)
+        assert x.shape == (len(x), 4 + NUM_CLASSES + NM)
 
         likely = x[:, 4 : 4 + NUM_CLASSES].max(axis=1) > conf_threshold
         x = x[likely]
@@ -335,7 +337,7 @@ class SegModel:
         bottom: int,
         left: int,
         right: int,
-        color: tuple[int, int, int],
+        color: Color,
     ) -> np.ndarray:
         import cv2
 

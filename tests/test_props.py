@@ -10,11 +10,26 @@ from .utils.proptest import arbitrary_rgb_image as arb_img
 
 
 @settings(
-    deadline=1 * 1000,
-    max_examples=50,
+    max_examples=200,
+)
+@given(img=arb_img((1, 2000), (1, 2000)))
+def test_preprocess(img: PILImage, seg_model: SegModel) -> None:
+    B = 1
+    CH = 3
+    H = seg_model.model_height
+    W = seg_model.model_width
+
+    blob, *_ = seg_model.preprocess(img)
+    assert blob.shape == (B, CH, H, W)
+    assert blob.min() >= 0.0
+    assert blob.max() <= 1.0
+
+
+@settings(
+    deadline=2 * 1000,
 )
 @given(
-    img=arb_img((1, 1000), (1, 1000)),
+    img=arb_img((1, 2000), (1, 2000)),
     iou=st.none() | st.floats(0.01, 1.0),
     score=st.none() | st.floats(0.01, 1.0),
 )
