@@ -14,5 +14,7 @@ wheels/
 .venv
 venv
 
+generated
+output.png
+
 draw.py
-boxes.txt
