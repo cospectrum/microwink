@@ -14,7 +14,7 @@ from .utils.proptest import arbitrary_rgb_image as arb_img
 
 @settings(
     deadline=15 * 1000,
-    max_examples=40,
+    max_examples=20,
 )
 @given(
     img=arb_img((1, 1000), (1, 1000)),

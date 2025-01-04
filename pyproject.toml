@@ -1,6 +1,6 @@
 [project]
 name = "microwink"
-version = "0.0.3"
+version = "0.0.4"
 description = "Lightweight instance segmentation of card IDs"
 readme = "README.md"
 license = { text = "Apache-2.0" }
