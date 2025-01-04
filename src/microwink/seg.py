@@ -1,7 +1,7 @@
 import os
 import cv2
 import numpy as np
-import onnxruntime as ort
+import onnxruntime as ort  # type: ignore
 
 from numpy.typing import DTypeLike
 from typing import Any, NewType
