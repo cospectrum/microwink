@@ -30,7 +30,7 @@ cards = seg_model.apply(img)
 
 for card in cards:
     print(f"score={card.score}, box={card.box}")
-    img = draw_mask(img, card.mask > 0.5)
     img = draw_box(img, card.box)
+    img = draw_mask(img, card.mask > 0.5)
 img.save("./output.png")
 ```
