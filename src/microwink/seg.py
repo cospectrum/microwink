@@ -179,6 +179,7 @@ class SegModel:
         assert x.shape == (len(x), 4 + NUM_CLASSES + NM)
 
         likely = x[:, 4 : 4 + NUM_CLASSES].max(axis=1) > conf_threshold
+        assert likely.ndim == 1
         x = x[likely]
 
         scores = x[:, 4 : 4 + NUM_CLASSES].max(axis=1)
@@ -339,12 +340,13 @@ class SegModel:
         right: int,
         color: Color,
     ) -> np.ndarray:
-        import cv2
-
         assert img.ndim == 3
-        return cv2.copyMakeBorder(
-            img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color
-        )
+        pil_img = Image.fromarray(img)
+        ow = pil_img.width + left + right
+        oh = pil_img.height + top + bottom
+        out = Image.new("RGB", (ow, oh), color)
+        out.paste(pil_img, (left, top))
+        return np.array(out).astype(img.dtype)
 
 
 def resize(buf: np.ndarray, size: tuple[W, H]) -> np.ndarray:
