@@ -49,7 +49,10 @@ def test_samples(
     actual = img.copy()
     for card, box in zip(cards, boxes):
         assert 0.0 < card.score < 1.0
+        assert card.mask.min() >= 0.0
+        assert card.mask.max() <= 1.0
         assert round_box(card.box) == box
+
         actual = draw_box(actual, card.box)
         actual = draw_mask(actual, card.mask > BIN_THRESHOLD)
     assert truth == actual

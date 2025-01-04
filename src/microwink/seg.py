@@ -86,7 +86,10 @@ class SegModel:
         assert image.width > 0
         assert image.height > 0
 
-        raw = self._run(image, threshold.confidence, threshold.iou)
+        assert 0.0 <= threshold.iou <= 1.0
+        assert 0.0 <= threshold.confidence <= 1.0
+
+        raw = self._run(image, threshold.confidence, iou_threshold=threshold.iou)
         if raw is None:
             return []
 
