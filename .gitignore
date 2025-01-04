@@ -6,9 +6,12 @@ dist/
 wheels/
 *.egg-info
 
-# Virtual environments
-.venv
+.hypothesis
 
 .DS_Store
+
+# Virtual environments
+.venv
+venv
 
 draw.py
