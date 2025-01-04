@@ -1,14 +1,24 @@
 import os
-import math
-import onnxruntime as ort  # type: ignore # missing stubs
+import cv2
 import numpy as np
+import onnxruntime as ort
 
-from typing import Sequence
+from numpy.typing import DTypeLike
+from typing import Any, NewType
 from dataclasses import dataclass
 from PIL import Image
-from PIL.Image import Image as PILImage
+from PIL.Image import Image as PILImage, Resampling
 
 from . import common
+
+
+Dtype = DTypeLike
+Color = tuple[int, int, int]
+
+H = NewType("H", int)
+W = NewType("W", int)
+BgrBuf = NewType("BgrBuf", np.ndarray)
+RgbBuf = NewType("RgbBuf", np.ndarray)
 
 
 @dataclass
@@ -29,288 +39,230 @@ class SegResult:
 
 
 @dataclass
-class Result:
+class RawResult:
     boxes: np.ndarray
-    scores: np.ndarray
-    mask_maps: np.ndarray
+    masks: np.ndarray
 
 
-H = int
-W = int
+def rgb_to_bgr(img: RgbBuf) -> BgrBuf:
+    bgr = img[..., ::-1]
+    return BgrBuf(bgr)
 
 
-@dataclass
-class InputShape:
-    batch: int
-    ch: int
-    h: H
-    w: W
-
-    def as_tuple(self) -> tuple[int, int, int, int]:
-        return (self.batch, self.ch, self.h, self.w)
-
-
-@dataclass
 class SegModel:
-    """SegModel is thread-safe if and only if the `session` is thread-safe"""
-
     session: ort.InferenceSession
-    input_names: list[str]
-    output_names: list[str]
-    input_shape: InputShape
+    dtype: Dtype
+    model_width: int
+    model_height: int
+    input_: Any
 
     @staticmethod
     def from_path(
-        path: str | os.PathLike, *, providers: Sequence[str] | None = None
+        path: str | os.PathLike, providers: list[str] | None = None
     ) -> "SegModel":
-        return SegModel.from_session(ort.InferenceSession(path, providers=providers))
+        session = ort.InferenceSession(
+            path,
+            providers=providers or ["CPUExecutionProvider"],
+        )
+        return SegModel.from_session(session)
 
     @staticmethod
     def from_session(session: ort.InferenceSession) -> "SegModel":
-        inputs = session.get_inputs()
-        input_names = [inp.name for inp in inputs]
-        batch, ch, h, w = inputs[0].shape
-        input_shape = InputShape(batch=batch, ch=ch, h=h, w=w)
+        return SegModel(session)
 
-        outputs = session.get_outputs()
-        output_names = [out.name for out in outputs]
-        return SegModel(
-            session=session,
-            input_shape=input_shape,
-            input_names=input_names,
-            output_names=output_names,
-        )
+    def __init__(self, session: ort.InferenceSession) -> None:
+        self.session = session
+        inputs = self.session.get_inputs()
+        assert len(inputs) == 1, len(inputs)
+        self.input_ = inputs[0]
+        if self.input_.type == "tensor(float16)":
+            self.dtype = np.float16
+        else:
+            self.dtype = np.float32
+        self.model_height, self.model_width = self.input_.shape[-2:]
 
     def apply(
-        self,
-        image: PILImage,
-        threshold: Threshold = Threshold.default(),
+        self, image: PILImage, threshold: Threshold = Threshold()
     ) -> list[SegResult]:
+        CLASS_ID = 0.0
+
         assert image.mode == "RGB"
-        tensor = self.preprocess(image)
-        net_outs = self.forward(tensor)
-        assert len(net_outs) == 2
+        buf = np.array(image)
+        img_buf = rgb_to_bgr(RgbBuf(buf))
 
-        img_size = (image.height, image.width)
-        result = self.postprocess(net_outs, img_size, threshold)
-        if result is None:
+        raw = self._forward(img_buf, threshold.confidence, threshold.iou)
+        if raw is None:
             return []
+        assert len(raw.boxes) == len(raw.masks)
 
-        out = []
-        assert len(result.boxes) == len(result.scores) == len(result.mask_maps)
-        for box, score, mask in zip(result.boxes, result.scores, result.mask_maps):
-            assert mask.ndim == 2
-            assert mask.dtype == np.float64
-            out.append(
+        results = []
+        for raw_bbox, raw_mask in zip(raw.boxes, raw.masks):
+            x1, y1, x2, y2, score, class_id = raw_bbox
+            assert class_id == CLASS_ID, class_id
+            assert 0.0 <= score <= 1.0
+
+            box = common.Box.from_xyxy([x1, y1, x2, y2])
+            results.append(
                 SegResult(
-                    box=common.Box.from_xyxy(box),
-                    score=float(score),
-                    mask=mask,
+                    score=score,
+                    mask=raw_mask,
+                    box=box,
                 )
             )
-        return out
+        return results
+
+    def _forward(
+        self, im0: BgrBuf, conf_threshold: float, iou_threshold: float
+    ) -> RawResult | None:
+        NM = 32
+        assert im0.ndim == 3
+        blob, ratio, (pad_w, pad_h) = self.preprocess(im0)
+        assert blob.ndim == 4
+        preds = self.session.run(None, {self.input_.name: blob})
+        out = self.postprocess(
+            preds,
+            im0=im0,
+            ratio=ratio,
+            pad_w=pad_w,
+            pad_h=pad_h,
+            conf_threshold=conf_threshold,
+            iou_threshold=iou_threshold,
+            nm=NM,
+        )
+        if out is None:
+            return None
+        boxes, masks = out
+        assert isinstance(boxes, np.ndarray)
+        assert isinstance(masks, np.ndarray)
+        masks = common.sigmoid(masks)
+        return RawResult(boxes=boxes, masks=masks)
+
+    def preprocess(
+        self, img_buf: BgrBuf
+    ) -> tuple[np.ndarray, float, tuple[float, float]]:
+        BORDER_COLOR = (114, 114, 114)
+        EPS = 0.1
+        img = np.array(img_buf)
+
+        ih, iw, _ = img.shape
+        oh, ow = self.model_height, self.model_width
+        r = min(oh / ih, ow / iw)
+        rw, rh = round(iw * r), round(ih * r)
+
+        pad_w, pad_h = [
+            (ow - rw) / 2,
+            (oh - rh) / 2,
+        ]
+        if (iw, ih) != (rw, rh):
+            img = resize(img, (W(rw), H(rh)))
+        top, bottom = round(pad_h - EPS), round(pad_h + EPS)
+        left, right = round(pad_w - EPS), round(pad_w + EPS)
+        img = cv2.copyMakeBorder(
+            img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=BORDER_COLOR
+        )
+
+        img = (1 / 255.0) * np.ascontiguousarray(
+            np.einsum("HWC->CHW", img)[::-1],  # type: ignore
+            dtype=self.dtype,
+        )
+        assert img.ndim == 3
+        img = img[None]
+        return img, r, (pad_w, pad_h)
 
     def postprocess(
         self,
-        outs: list[np.ndarray],
-        img_size: tuple[H, W],
-        threshold: Threshold,
-    ) -> Result | None:
-        NUM_MASKS = 32
-        NUM_CLASSES = 1
-        OFFSET = 4
+        preds,
+        im0,
+        ratio: float,
+        pad_w,
+        pad_h,
+        conf_threshold,
+        iou_threshold,
+        nm: int,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        x, protos = preds[0], preds[1]
+        x = np.einsum("bcn->bnc", x)
+        x = x[np.amax(x[..., 4:-nm], axis=-1) > conf_threshold]
+        x = np.c_[
+            x[..., :4],
+            np.amax(x[..., 4:-nm], axis=-1),
+            np.argmax(x[..., 4:-nm], axis=-1),
+            x[..., -nm:],
+        ]
+        x = x[cv2.dnn.NMSBoxes(x[:, :4], x[:, 4], conf_threshold, iou_threshold)]
 
-        box_out, mask_out = outs
-        assert box_out.shape == (1, OFFSET + NUM_CLASSES + NUM_MASKS, 8400)
-        assert mask_out.shape == (1, NUM_MASKS, 160, 160)
-
-        preds = np.squeeze(box_out).T
-        assert preds.shape == (8400, OFFSET + NUM_CLASSES + NUM_MASKS)
-        split_at = OFFSET + NUM_CLASSES
-
-        scores = np.max(preds[:, OFFSET:split_at], axis=1)
-        preds = preds[scores > threshold.confidence, :]
-        scores = scores[scores > threshold.confidence]
-        if len(scores) == 0:
+        if len(x) == 0:
             return None
 
-        box_preds = preds[..., :split_at]
-        mask_preds = preds[..., split_at:]
+        x[..., [0, 1]] -= x[..., [2, 3]] / 2
+        x[..., [2, 3]] += x[..., [0, 1]]
 
-        boxes = self.extract_boxes(box_preds, img_size)
-        indexes = nms(boxes, scores, threshold.iou)
-        if len(indexes) == 0:
-            return None
-        final_boxes = boxes[indexes]
-        final_scores = scores[indexes]
-        final_mask_maps = self.postprocess_mask(
-            mask_preds[indexes],
-            mask_out,
-            final_boxes,
-            img_size,
-        )
-        assert len(final_boxes) == len(final_scores) == len(final_mask_maps)
-        return Result(
-            boxes=final_boxes,
-            scores=final_scores,
-            mask_maps=final_mask_maps,
-        )
+        x[..., :4] -= [pad_w, pad_h, pad_w, pad_h]
+        x[..., :4] /= ratio
 
-    def postprocess_mask(
-        self,
-        mask_preds: np.ndarray,
-        mask_out: np.ndarray,
-        boxes: np.ndarray,
-        img_size: tuple[H, W],
-    ) -> np.ndarray:
-        assert len(mask_preds) > 0
-        mask_out = np.squeeze(mask_out)
-        num_mask, mask_height, mask_width = mask_out.shape
-        masks = mask_preds @ mask_out.reshape((num_mask, -1))
-        masks = masks.reshape((-1, mask_height, mask_width))
+        x[..., [0, 2]] = x[:, [0, 2]].clip(0, im0.shape[1])
+        x[..., [1, 3]] = x[:, [1, 3]].clip(0, im0.shape[0])
 
-        ih, iw = img_size
-        scaled_boxes = self.rescale_boxes(
-            boxes,
-            (ih, iw),
-            (mask_height, mask_width),
-        )
-        mask_maps = np.zeros((len(scaled_boxes), ih, iw))
-        assert len(scaled_boxes) == len(masks)
-        assert len(scaled_boxes) == len(boxes)
-        for i, (box, scaled_box, mask) in enumerate(zip(boxes, scaled_boxes, masks)):
-            assert mask.ndim == 2
-
-            scale_x1 = math.floor(scaled_box[0])
-            scale_y1 = math.floor(scaled_box[1])
-            scale_x2 = math.ceil(scaled_box[2])
-            scale_y2 = math.ceil(scaled_box[3])
-
-            x1 = math.floor(box[0])
-            y1 = math.floor(box[1])
-            x2 = math.ceil(box[2])
-            y2 = math.ceil(box[3])
-
-            ow, oh = (x2 - x1, y2 - y1)
-            assert ow >= 0
-            assert oh >= 0
-            resized_mask = resize(
-                mask[scale_y1:scale_y2, scale_x1:scale_x2],
-                (ow, oh),
-            )
-            assert resized_mask.shape == (oh, ow)
-            mask_maps[i, y1:y2, x1:x2] = common.sigmoid(resized_mask).clip(0.0, 1.0)
-
-        return mask_maps
-
-    def forward(self, tensor: np.ndarray) -> list[np.ndarray]:
-        assert tensor.shape == self.input_shape.as_tuple()
-        outs = self.session.run(
-            self.output_names,
-            {self.input_names[0]: tensor},
-        )
-        return outs
-
-    def preprocess(self, image: PILImage) -> np.ndarray:
-        assert image.mode == "RGB"
-        size = (self.input_shape.w, self.input_shape.h)
-        if image.size != size:
-            image = image.resize(size)
-        img = np.array(image).astype(np.float32)
-        assert img.ndim == 3
-        img /= 255.0
-        img = img.transpose(2, 0, 1)
-        tensor = img[np.newaxis, :, :, :]
-        return tensor
+        h, w, _ = im0.shape
+        masks = self.process_mask(protos[0], x[:, 6:], x[:, :4], (h, w))
+        return x[..., :6], masks
 
     @staticmethod
-    def rescale_boxes(
-        boxes: np.ndarray,
-        div_shape: tuple[H, W],
-        mul_shape: tuple[H, W],
+    def crop_mask(masks: np.ndarray, boxes: np.ndarray) -> np.ndarray:
+        N, h, w = masks.shape
+        assert boxes.shape == (N, 4)
+        x1, y1, x2, y2 = np.split(boxes[:, :, None], 4, 1)
+        r = np.arange(w, dtype=x1.dtype)[None, None, :]
+        c = np.arange(h, dtype=x1.dtype)[None, :, None]
+        return masks * ((r >= x1) * (r < x2) * (c >= y1) * (c < y2))
+
+    def process_mask(
+        self,
+        protos: np.ndarray,
+        masks_in: np.ndarray,
+        bboxes: np.ndarray,
+        img_size: tuple[H, W],
     ) -> np.ndarray:
-        shape = np.array(
-            [
-                div_shape[1],
-                div_shape[0],
-                div_shape[1],
-                div_shape[0],
-            ]
-        )
-        boxes = np.divide(boxes, shape, dtype=np.float32)
-        boxes *= np.array(
-            [
-                mul_shape[1],
-                mul_shape[0],
-                mul_shape[1],
-                mul_shape[0],
-            ]
-        )
-        return boxes
+        N = len(masks_in)
+        ih, iw = img_size
+        c, mh, mw = protos.shape
+        masks = np.matmul(masks_in, protos.reshape((c, -1))).reshape((-1, mh, mw))
+        assert masks.shape == (N, mh, mw)
+        masks = self.scale_mask(np.ascontiguousarray(masks), (ih, iw))
+        assert masks.shape == (N, ih, iw)
+        return self.crop_mask(masks, bboxes)
 
-    def extract_boxes(self, box_preds: np.ndarray, img_size: tuple[H, W]) -> np.ndarray:
-        h, w = img_size
-        boxes = box_preds[:, :4]
-        boxes = self.rescale_boxes(
-            boxes,
-            (self.input_shape.h, self.input_shape.w),
-            (h, w),
-        )
-        boxes = xywh2xyxy(boxes)
-        boxes[:, 0] = np.clip(boxes[:, 0], 0, w)
-        boxes[:, 1] = np.clip(boxes[:, 1], 0, h)
-        boxes[:, 2] = np.clip(boxes[:, 2], 0, w)
-        boxes[:, 3] = np.clip(boxes[:, 3], 0, h)
-        assert len(boxes) == len(box_preds)
-        return boxes
+    @staticmethod
+    def scale_mask(masks: np.ndarray, img_size: tuple[H, W]) -> np.ndarray:
+        EPS = 0.1
+        ih, iw = img_size
+        N, mh, mw = masks.shape
 
+        gain = min(mh / ih, mw / iw)
+        pad_w = (mw - iw * gain) / 2
+        pad_h = (mh - ih * gain) / 2
 
-def xywh2xyxy(boxes: np.ndarray) -> np.ndarray:
-    out = np.copy(boxes)
-    out[..., 0] = boxes[..., 0] - boxes[..., 2] / 2
-    out[..., 1] = boxes[..., 1] - boxes[..., 3] / 2
-    out[..., 2] = boxes[..., 0] + boxes[..., 2] / 2
-    out[..., 3] = boxes[..., 1] + boxes[..., 3] / 2
-    return out
+        top = round(pad_h - EPS)
+        bottom = round(mh - pad_h + EPS)
 
+        left = round(pad_w - EPS)
+        right = round(mw - pad_w + EPS)
 
-def nms(
-    boxes: np.ndarray,
-    scores: np.ndarray,
-    iou_threshold: float,
-) -> list[int]:
-    sorted_indices = np.argsort(scores)[::-1]
-
-    keep_boxes = []
-    while sorted_indices.size > 0:
-        box_id = int(sorted_indices[0])
-        ious = compute_iou(boxes[box_id, :], boxes[sorted_indices[1:], :])
-        keep_indices = np.where(ious < iou_threshold)[0]
-        sorted_indices = sorted_indices[keep_indices + 1]
-
-        keep_boxes.append(box_id)
-    return keep_boxes
-
-
-def compute_iou(box: np.ndarray, boxes: np.ndarray) -> np.ndarray:
-    xmin = np.maximum(box[0], boxes[:, 0])
-    ymin = np.maximum(box[1], boxes[:, 1])
-    xmax = np.minimum(box[2], boxes[:, 2])
-    ymax = np.minimum(box[3], boxes[:, 3])
-
-    intersection_area = np.maximum(0, xmax - xmin) * np.maximum(0, ymax - ymin)
-
-    box_area = (box[2] - box[0]) * (box[3] - box[1])
-    boxes_area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-    union_area = box_area + boxes_area - intersection_area
-
-    iou = intersection_area / union_area
-    return iou
+        masks = masks[:, top:bottom, left:right]
+        masks_out = np.zeros((N, ih, iw))
+        for i, mask in enumerate(masks):
+            resized_mask = resize(mask, (iw, ih))
+            assert resized_mask.shape == (ih, iw)
+            masks_out[i] = resized_mask
+        return masks_out
 
 
 def resize(buf: np.ndarray, size: tuple[W, H]) -> np.ndarray:
-    img = Image.fromarray(buf).resize(size)
-    out = np.array(img)
+    w, h = size
+    assert w > 0
+    assert h > 0
+    img = Image.fromarray(buf).resize(size, Resampling.LANCZOS)
+    out = np.array(img).astype(buf.dtype)
     assert out.dtype == buf.dtype
     assert out.ndim == buf.ndim
     return out

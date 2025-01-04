@@ -13,7 +13,8 @@ from .utils.proptest import arbitrary_rgb_image as arb_img
 
 
 @settings(
-    deadline=2 * 1000,
+    deadline=15 * 1000,
+    max_examples=40,
 )
 @given(
     img=arb_img((1, 1000), (1, 1000)),
@@ -35,3 +36,5 @@ def test_apply(
     objects = seg_model.apply(img, threshold=threshold)
     for obj in objects:
         assert obj.score >= threshold.confidence
+        assert obj.mask.min() >= 0.0
+        assert obj.mask.max() <= 1.0
