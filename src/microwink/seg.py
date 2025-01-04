@@ -83,6 +83,8 @@ class SegModel:
     ) -> list[SegResult]:
         CLASS_ID = 0
         assert image.mode == "RGB"
+        assert image.width > 0
+        assert image.height > 0
 
         raw = self._run(image, threshold.confidence, threshold.iou)
         if raw is None:
