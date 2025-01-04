@@ -15,5 +15,6 @@ wheels/
 venv
 
 generated
+output.png
 
 draw.py
